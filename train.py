@@ -16,6 +16,8 @@ from utils.dice_score import dice_loss
 from evaluate import evaluate
 from unet import UNet
 
+import torchsummary
+
 dir_train_img = Path('./data/images/train/')
 dir_train_mask = Path('./data/labels/train/')
 dir_valid_img = Path('./data/images/valid/')
@@ -34,7 +36,7 @@ def train_net(net,
               img_scale: float = 0.5,
               amp: bool = False):
     # 1. Create dataset
-    
+
     #try:
     #    train_dataset = CarvanaDataset(dir_train_img, dir_train_mask, img_scale)
     #    valid_dataset = CarvanaDataset(dir_valid_img, dir_valid_mask, img_scale)
@@ -53,7 +55,7 @@ def train_net(net,
     # 3. Create data loaders
     loader_args = dict(batch_size=batch_size, num_workers=4, pin_memory=True)
     train_loader = DataLoader(train_dataset, shuffle=True, **loader_args)
-    val_loader = DataLoader(valid_dataset, shuffle=False, drop_last=True, **loader_args)
+    val_loader = DataLoader(valid_dataset, shuffle=False, drop_last=True, pin_memory=True)
 
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
@@ -84,10 +86,15 @@ def train_net(net,
     for epoch in range(epochs):
         net.train()
         epoch_loss = 0
+        train_accuracy = 0
+
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images = batch['image']
                 true_masks = batch['mask']
+
+                if epoch == 0 and pbar.n == 0:
+                    torchsummary.summary(net, images.size()[1:])
 
                 assert images.shape[1] == net.n_channels, \
                     f'Network has been defined with {net.n_channels} input channels, ' \
@@ -99,52 +106,56 @@ def train_net(net,
 
                 with torch.cuda.amp.autocast(enabled=amp):
                     masks_pred = net(images)
-                    loss = criterion(masks_pred, true_masks) \
-                           + dice_loss(F.softmax(masks_pred, dim=1).float(),
-                                       F.one_hot(true_masks, net.n_classes).permute(0, 3, 1, 2).float(),
-                                       multiclass=True)
+                    loss = criterion(masks_pred, true_masks)
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
                 grad_scaler.step(optimizer)
                 grad_scaler.update()
 
+                #match = (torch.softmax(masks_pred, dim=1).argmax(dim=1) == true_masks).type(torch.bool).sum()
+                masks_pred_img = torch.argmax(masks_pred, dim=1)
+
+                match = (masks_pred_img == true_masks).type(torch.bool).sum()
+                shape_total = masks_pred_img.size(-2) * masks_pred_img.size(-1)
+                train_accuracy = match / (shape_total * masks_pred_img.size(0))
+
                 pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
                 experiment.log({
                     'train loss': loss.item(),
+                    'train_accuracy' : train_accuracy,
                     'step': global_step,
                     'epoch': epoch
                 })
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
-                # Evaluation round
-                division_step = (n_train // (10 * batch_size))
-                if division_step > 0:
-                    if global_step % division_step == 0:
-                        histograms = {}
-                        for tag, value in net.named_parameters():
-                            tag = tag.replace('/', '.')
-                            histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
-                            histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
+            histograms = {}
+            for tag, value in net.named_parameters():
+                tag = tag.replace('/', '.')
+                histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
+                histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_score = evaluate(net, val_loader, device)
-                        scheduler.step(val_score)
+            val_loss, val_accuracy, val_score = evaluate(net, val_loader, device)
+            scheduler.step(val_score)
 
-                        logging.info('Validation Dice score: {}'.format(val_score))
-                        experiment.log({
-                            'learning rate': optimizer.param_groups[0]['lr'],
-                            'validation Dice': val_score,
-                            'images': wandb.Image(images[0].cpu()),
-                            'masks': {
-                                'true': wandb.Image(true_masks[0].float().cpu()),
-                                'pred': wandb.Image(torch.softmax(masks_pred, dim=1).argmax(dim=1)[0].float().cpu()),
-                            },
-                            'step': global_step,
-                            'epoch': epoch,
-                            **histograms
-                        })
+            logging.info('Validation IoU score: {}'.format(val_score))
+            logging.info('Accuracy : {}'.format(val_accuracy))
+            experiment.log({
+                'learning rate': optimizer.param_groups[0]['lr'],
+                'validation IoU': val_score,
+                'validation Loss' : val_loss,
+                'validation accuracy' : val_accuracy,
+                'images': wandb.Image(images[0].cpu()),
+                'masks': {
+                    'true': wandb.Image(true_masks[0].float().cpu()),
+                    'pred': wandb.Image(torch.softmax(masks_pred, dim=1).argmax(dim=1)[0].float().cpu()),
+                },
+                'step': global_step,
+                'epoch': epoch,
+                **histograms
+            })
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
