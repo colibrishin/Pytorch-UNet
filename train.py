@@ -137,7 +137,7 @@ def train_net(net,
                 histograms['Weights/' + tag] = wandb.Histogram(value.data.cpu())
                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-            val_loss, val_accuracy, val_score = evaluate(net, val_loader, device)
+            val_loss, val_accuracy, val_score, val_iou_rd, val_iou_sw = evaluate(net, val_loader, device)
             scheduler.step(val_score)
 
             logging.info('Validation IoU score: {}'.format(val_score))
@@ -145,6 +145,8 @@ def train_net(net,
             experiment.log({
                 'learning rate': optimizer.param_groups[0]['lr'],
                 'validation IoU': val_score,
+                'validation Road' : val_iou_rd,
+                'validation Sidewalk' : val_iou_sw,
                 'validation Loss' : val_loss,
                 'validation accuracy' : val_accuracy,
                 'images': wandb.Image(images[0].cpu()),

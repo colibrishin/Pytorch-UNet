@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from utils.iou_score import iou_score
+from utils.iou_score import iou_score, iou_road, iou_sidewalk
 
 def evaluate(net, dataloader, device):
     net.eval()
@@ -10,6 +10,8 @@ def evaluate(net, dataloader, device):
     criterion = torch.nn.CrossEntropyLoss()
 
     iou = 0
+    iou_rd = 0
+    iou_sw = 0
     accuracy = 0
     loss = 0
 
@@ -35,15 +37,22 @@ def evaluate(net, dataloader, device):
             # convert to one-hot format
             if net.n_classes == 1:
                 mask_pred = (F.sigmoid(mask_pred) > 0.5).float()
-                iou += iou_score(mask_pred, mask_true, net.n_classes)
+                iou += iou_score(mask_pred, mask_true)
             else:
                 mask_pred = F.one_hot(mask_pred.argmax(dim=1), net.n_classes)
                 mask_pred = mask_pred.permute(0, 3, 1, 2).float()
-                iou += iou_score(mask_pred, mask_true, net.n_classes)
+                iou += iou_score(mask_pred, mask_true)
+                iou_rd += iou_road(mask_pred, mask_true, 32)
+                iou_sw += iou_sidewalk(mask_pred, mask_true, 36)
 
     net.train()
 
     # Fixes a potential division by zero error
     if num_val_batches == 0:
         return iou
-    return ((loss / num_val_batches), (accuracy/num_val_batches), (iou / num_val_batches))
+    return ((loss / num_val_batches), 
+            (accuracy/num_val_batches), 
+            (iou / num_val_batches),
+            (iou_rd / num_val_batches),
+            (iou_sw / num_val_batches),
+            )
